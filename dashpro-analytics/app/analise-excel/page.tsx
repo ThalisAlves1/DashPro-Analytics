@@ -1,17 +1,22 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import type { ReactElement, ReactNode } from "react";
+import { useRouter } from "next/navigation";
 import * as XLSX from "xlsx";
+import { supabase } from "@/lib/supabase";
+import { LogoutButton } from "@/components/auth/logout-button";
+
 import {
   Upload,
   FileSpreadsheet,
   Filter,
   TrendingUp,
   TrendingDown,
-  Building2,
   Table,
   BarChart3,
   AlertTriangle,
+  Trash2,
 } from "lucide-react";
 
 import {
@@ -134,11 +139,12 @@ function parseDate(value: unknown) {
     if (year < 100) year += 2000;
 
     const date = new Date(year, month, day);
+
     return Number.isNaN(date.getTime()) ? null : date;
   }
 
-  const isoDate = new Date(text);
-  return Number.isNaN(isoDate.getTime()) ? null : isoDate;
+  const date = new Date(text);
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 function formatDateKey(date: Date | null) {
@@ -187,7 +193,10 @@ function uniqueValues(values: Array<string | number | null>) {
   ).sort();
 }
 
-function groupSum(rows: NormalizedRow[], keyGetter: (row: NormalizedRow) => string) {
+function groupSum(
+  rows: NormalizedRow[],
+  keyGetter: (row: NormalizedRow) => string
+) {
   const result: Record<string, number> = {};
 
   rows.forEach((row) => {
@@ -278,6 +287,8 @@ function buildPivot(
 }
 
 export default function AnaliseExcelPage() {
+  const router = useRouter();
+
   const [fileName, setFileName] = useState("");
   const [sheetInfos, setSheetInfos] = useState<SheetInfo[]>([]);
   const [allRows, setAllRows] = useState<NormalizedRow[]>([]);
@@ -292,6 +303,177 @@ export default function AnaliseExcelPage() {
   const [drillYear, setDrillYear] = useState("");
   const [drillMonth, setDrillMonth] = useState("");
   const [error, setError] = useState("");
+
+  const [checkingAuth, setCheckingAuth] = useState(true);
+  const [loadingBase, setLoadingBase] = useState(true);
+  const [savingBase, setSavingBase] = useState(false);
+  const [baseUpdatedAt, setBaseUpdatedAt] = useState("");
+
+  async function getCurrentUserId() {
+    const { data: userData, error } = await supabase.auth.getUser();
+
+    if (error || !userData.user) {
+      return null;
+    }
+
+    return userData.user.id;
+  }
+
+  function serializeRows(rows: NormalizedRow[]) {
+    return rows.map((row) => ({
+      ...row,
+      data: row.data ? row.data.toISOString() : null,
+    }));
+  }
+
+  function restoreRows(rows: Array<NormalizedRow & { data: string | null }>) {
+    return rows.map((row) => ({
+      ...row,
+      data: row.data ? new Date(row.data) : null,
+    }));
+  }
+
+  async function loadExcelBase() {
+    setLoadingBase(true);
+
+    const userId = await getCurrentUserId();
+
+    if (!userId) {
+      setLoadingBase(false);
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from("excel_bases")
+      .select("*")
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (error) {
+      console.log("Erro ao carregar base Excel:", error.message);
+      setLoadingBase(false);
+      return;
+    }
+
+    if (data) {
+      const savedSheets = (data.sheet_infos || []) as SheetInfo[];
+      const savedRows = (data.rows || []) as Array<
+        NormalizedRow & { data: string | null }
+      >;
+
+      setFileName(data.file_name || "");
+      setSheetInfos(savedSheets);
+      setAllRows(restoreRows(savedRows));
+      setSelectedSheets(savedSheets.map((sheet) => sheet.name));
+      setBaseUpdatedAt(data.updated_at || "");
+    }
+
+    setLoadingBase(false);
+  }
+
+  async function saveExcelBaseToSupabase(
+    fileNameToSave: string,
+    sheetsToSave: SheetInfo[],
+    rowsToSave: NormalizedRow[]
+  ) {
+    setSavingBase(true);
+
+    const userId = await getCurrentUserId();
+
+    if (!userId) {
+      alert("Usuário não autenticado.");
+      setSavingBase(false);
+      return;
+    }
+
+    const { error } = await supabase.from("excel_bases").upsert(
+      {
+        user_id: userId,
+        file_name: fileNameToSave,
+        sheet_infos: sheetsToSave,
+        rows: serializeRows(rowsToSave),
+        updated_at: new Date().toISOString(),
+      },
+      {
+        onConflict: "user_id",
+      }
+    );
+
+    setSavingBase(false);
+
+    if (error) {
+      alert("Erro ao salvar base Excel: " + error.message);
+      return;
+    }
+
+    setBaseUpdatedAt(new Date().toISOString());
+    alert("Base Excel substituída e salva com sucesso!");
+  }
+
+  async function clearSavedBase() {
+    const confirmClear = confirm(
+      "Tem certeza que deseja limpar a base Excel salva? Essa ação removerá a base atual do Supabase."
+    );
+
+    if (!confirmClear) return;
+
+    const userId = await getCurrentUserId();
+
+    if (!userId) {
+      alert("Usuário não autenticado.");
+      return;
+    }
+
+    const { error } = await supabase
+      .from("excel_bases")
+      .delete()
+      .eq("user_id", userId);
+
+    if (error) {
+      alert("Erro ao limpar base: " + error.message);
+      return;
+    }
+
+    setFileName("");
+    setSheetInfos([]);
+    setAllRows([]);
+    setSelectedSheets([]);
+    setSelectedEmpresas([]);
+    setSelectedCategorias([]);
+    setSelectedRegioes([]);
+    setDataInicial("");
+    setDataFinal("");
+    setMesFiltro("");
+    setAnoFiltro("");
+    setDrillYear("");
+    setDrillMonth("");
+    setBaseUpdatedAt("");
+
+    alert("Base Excel limpa com sucesso!");
+  }
+
+  useEffect(() => {
+    async function startPage() {
+      try {
+        const { data: sessionData } = await supabase.auth.getSession();
+
+        if (!sessionData.session) {
+          router.push("/login");
+          return;
+        }
+
+        await loadExcelBase();
+      } catch (error) {
+        console.log("Erro ao verificar acesso:", error);
+        router.push("/login");
+      } finally {
+        setCheckingAuth(false);
+        setLoadingBase(false);
+      }
+    }
+
+    startPage();
+  }, []);
 
   function resetFilters() {
     setSelectedEmpresas([]);
@@ -418,11 +600,12 @@ export default function AnaliseExcelPage() {
 
         rawRows.forEach((row, index) => {
           const date = parseDate(dataColumn ? row[dataColumn] : null);
+
           const empresa = empresaColumn
             ? String(row[empresaColumn] || "Não informado")
             : sheetName;
 
-          const normalizedRow: NormalizedRow = {
+          collectedRows.push({
             id: `${sheetName}-${index}`,
             sheet: sheetName,
             empresa,
@@ -442,9 +625,7 @@ export default function AnaliseExcelPage() {
               : "Principal",
             valor: valorColumn ? parseNumber(row[valorColumn]) : 0,
             original: row,
-          };
-
-          collectedRows.push(normalizedRow);
+          });
         });
 
         collectedSheets.push({
@@ -457,6 +638,8 @@ export default function AnaliseExcelPage() {
       setSheetInfos(collectedSheets);
       setAllRows(collectedRows);
       setSelectedSheets(collectedSheets.map((sheet) => sheet.name));
+
+      await saveExcelBaseToSupabase(file.name, collectedSheets, collectedRows);
     } catch {
       setError("Erro ao ler o arquivo Excel.");
     }
@@ -665,7 +848,9 @@ export default function AnaliseExcelPage() {
     const previousTotal = sumValues(previousRows);
 
     const growth =
-      previousTotal > 0 ? ((totalGeral - previousTotal) / previousTotal) * 100 : null;
+      previousTotal > 0
+        ? ((totalGeral - previousTotal) / previousTotal) * 100
+        : null;
 
     return {
       previousTotal,
@@ -764,6 +949,21 @@ export default function AnaliseExcelPage() {
   const maxCompany = companyTotals[0];
   const minCompany = companyTotals[companyTotals.length - 1];
 
+  if (checkingAuth) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-slate-100 p-6">
+        <div className="rounded-3xl border border-slate-200 bg-white p-8 text-center shadow-sm">
+          <h1 className="text-xl font-bold text-slate-900">
+            Verificando acesso...
+          </h1>
+          <p className="mt-2 text-sm text-slate-500">
+            Aguarde enquanto validamos sua sessão.
+          </p>
+        </div>
+      </main>
+    );
+  }
+
   return (
     <main className="min-h-screen bg-slate-100 p-6 lg:p-8">
       <div className="mx-auto max-w-7xl">
@@ -783,21 +983,56 @@ export default function AnaliseExcelPage() {
               </p>
             </div>
 
-            <label className="inline-flex cursor-pointer items-center justify-center gap-2 rounded-2xl bg-white px-5 py-3 text-sm font-semibold text-slate-950 hover:bg-slate-100">
-              <Upload size={18} />
-              Carregar Excel
-              <input
-                type="file"
-                accept=".xlsx,.xls"
-                onChange={handleExcelUpload}
-                className="hidden"
-              />
-            </label>
+            <div className="flex flex-col gap-3 sm:flex-row">
+              <label className="inline-flex cursor-pointer items-center justify-center gap-2 rounded-2xl bg-white px-5 py-3 text-sm font-semibold text-slate-950 hover:bg-slate-100">
+                <Upload size={18} />
+                Substituir base Excel
+                <input
+                  type="file"
+                  accept=".xlsx,.xls"
+                  onChange={handleExcelUpload}
+                  className="hidden"
+                />
+              </label>
+
+              {allRows.length > 0 && (
+                <button
+                  onClick={clearSavedBase}
+                  className="inline-flex items-center justify-center gap-2 rounded-2xl border border-red-300 bg-red-500/20 px-5 py-3 text-sm font-semibold text-red-100 hover:bg-red-500/30"
+                >
+                  <Trash2 size={18} />
+                  Limpar base
+                </button>
+              )}
+
+              <LogoutButton />
+            </div>
           </div>
+
+          {loadingBase && (
+            <div className="mt-5 rounded-2xl bg-white/10 p-4 text-sm text-slate-200">
+              Carregando base salva...
+            </div>
+          )}
 
           {fileName && (
             <div className="mt-5 rounded-2xl bg-white/10 p-4 text-sm text-slate-200">
-              Arquivo carregado: <strong>{fileName}</strong>
+              <p>
+                Arquivo carregado: <strong>{fileName}</strong>
+              </p>
+
+              {baseUpdatedAt && (
+                <p className="mt-1 text-slate-300">
+                  Base atualizada em{" "}
+                  {new Date(baseUpdatedAt).toLocaleString("pt-BR")}
+                </p>
+              )}
+
+              {savingBase && (
+                <p className="mt-1 text-yellow-200">
+                  Salvando base no Supabase...
+                </p>
+              )}
             </div>
           )}
 
@@ -807,6 +1042,21 @@ export default function AnaliseExcelPage() {
             </div>
           )}
         </section>
+
+        {allRows.length === 0 && !loadingBase && (
+          <section className="rounded-3xl border border-dashed border-slate-300 bg-white p-10 text-center">
+            <FileSpreadsheet
+              className="mx-auto mb-4 text-slate-700"
+              size={42}
+            />
+            <h2 className="text-xl font-semibold text-slate-900">
+              Nenhuma base Excel carregada
+            </h2>
+            <p className="mt-2 text-slate-500">
+              Carregue um arquivo Excel para gerar os dashboards automáticos.
+            </p>
+          </section>
+        )}
 
         {allRows.length > 0 && (
           <>
@@ -1295,7 +1545,7 @@ function KpiCard({
   title: string;
   value: string;
   subtitle: string;
-  icon: React.ReactNode;
+  icon: ReactNode;
   alert?: boolean;
 }) {
   return (
@@ -1322,7 +1572,7 @@ function ChartCard({
   children,
 }: {
   title: string;
-  children: React.ReactElement;
+  children: ReactElement;
 }) {
   return (
     <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
@@ -1337,16 +1587,28 @@ function ChartCard({
   );
 }
 
-function CustomTooltip({ active, payload, label }: any) {
+function CustomTooltip({
+  active,
+  payload,
+  label,
+}: {
+  active?: boolean;
+  payload?: Array<{
+    dataKey?: string | number;
+    value?: string | number;
+  }>;
+  label?: string | number;
+}) {
   if (!active || !payload?.length) return null;
 
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-lg">
       <p className="mb-2 font-semibold text-slate-900">{label}</p>
 
-      {payload.map((item: any) => (
-        <p key={item.dataKey} className="text-sm text-slate-600">
-          {item.dataKey}: <strong>{formatCurrency(Number(item.value))}</strong>
+      {payload.map((item) => (
+        <p key={String(item.dataKey)} className="text-sm text-slate-600">
+          {item.dataKey}:{" "}
+          <strong>{formatCurrency(Number(item.value || 0))}</strong>
         </p>
       ))}
     </div>
