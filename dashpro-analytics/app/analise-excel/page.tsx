@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import * as XLSX from "xlsx";
@@ -17,6 +17,7 @@ import {
   BarChart3,
   AlertTriangle,
   Trash2,
+  Download,
 } from "lucide-react";
 
 import {
@@ -288,8 +289,10 @@ function buildPivot(
 
 export default function AnaliseExcelPage() {
   const router = useRouter();
+  const reportRef = useRef<HTMLDivElement>(null);
 
   const [fileName, setFileName] = useState("");
+  const [exportingPdf, setExportingPdf] = useState(false);
   const [sheetInfos, setSheetInfos] = useState<SheetInfo[]>([]);
   const [allRows, setAllRows] = useState<NormalizedRow[]>([]);
   const [selectedSheets, setSelectedSheets] = useState<string[]>([]);
@@ -318,13 +321,81 @@ export default function AnaliseExcelPage() {
 
     return userData.user.id;
   }
+async function exportDashboardToPdf() {
+  if (exportingPdf) return;
 
-  function serializeRows(rows: NormalizedRow[]) {
-    return rows.map((row) => ({
-      ...row,
-      data: row.data ? row.data.toISOString() : null,
-    }));
+  const element = reportRef.current;
+
+  if (!element) {
+    alert("Não encontrei a área do relatório para exportar.");
+    return;
   }
+
+  try {
+    setExportingPdf(true);
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    if (document.fonts?.ready) {
+      await document.fonts.ready;
+    }
+
+    const html2canvasModule = await import("html2canvas-pro");
+    const jsPDFModule = await import("jspdf");
+
+    const html2canvas = html2canvasModule.default;
+    const JsPDF = jsPDFModule.jsPDF;
+
+    const canvas = await html2canvas(element, {
+      scale: 1.2,
+      useCORS: true,
+      allowTaint: true,
+      backgroundColor: "#f1f5f9",
+      logging: true,
+      ignoreElements: (htmlElement) =>
+        htmlElement.getAttribute("data-pdf-ignore") === "true",
+    });
+
+    const imgData = canvas.toDataURL("image/png");
+
+    const pdf = new JsPDF({
+      orientation: "landscape",
+      unit: "mm",
+      format: "a4",
+      compress: true,
+    });
+
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const pageHeight = pdf.internal.pageSize.getHeight();
+
+    const imgWidth = pageWidth;
+    const imgHeight = (canvas.height * imgWidth) / canvas.width;
+
+    let position = 0;
+    let heightLeft = imgHeight;
+
+    pdf.addImage(imgData, "PNG", 0, position, imgWidth, imgHeight);
+    heightLeft -= pageHeight;
+
+    while (heightLeft > 0) {
+      position -= pageHeight;
+      pdf.addPage();
+      pdf.addImage(imgData, "PNG", 0, position, imgWidth, imgHeight);
+      heightLeft -= pageHeight;
+    }
+
+    const date = new Date().toLocaleDateString("pt-BR").replaceAll("/", "-");
+
+    pdf.save(`relatorio-dashpro-${date}.pdf`);
+  } catch (error) {
+    console.error("Erro detalhado ao exportar PDF:", error);
+    alert(
+      "Erro ao exportar PDF. Abra o Console do navegador para ver o detalhe técnico."
+    );
+  } finally {
+    setExportingPdf(false);
+  }
+}
 
   function restoreRows(rows: Array<NormalizedRow & { data: string | null }>) {
     return rows.map((row) => ({
@@ -370,7 +441,12 @@ export default function AnaliseExcelPage() {
 
     setLoadingBase(false);
   }
-
+function serializeRows(rows: NormalizedRow[]) {
+  return rows.map((row) => ({
+    ...row,
+    data: row.data ? row.data.toISOString() : null,
+  }));
+}
   async function saveExcelBaseToSupabase(
     fileNameToSave: string,
     sheetsToSave: SheetInfo[],
@@ -966,7 +1042,7 @@ export default function AnaliseExcelPage() {
 
   return (
     <main className="min-h-screen bg-slate-100 p-6 lg:p-8">
-      <div className="mx-auto max-w-7xl">
+      <div ref={reportRef} className="mx-auto max-w-7xl">
         <section className="mb-8 rounded-3xl bg-slate-950 p-6 text-white shadow-sm">
           <div className="flex flex-col justify-between gap-6 lg:flex-row lg:items-center">
             <div>
@@ -994,7 +1070,18 @@ export default function AnaliseExcelPage() {
                   className="hidden"
                 />
               </label>
-
+{allRows.length > 0 && (
+  <button
+    type="button"
+    onClick={exportDashboardToPdf}
+    disabled={exportingPdf}
+    data-pdf-ignore="true"
+    className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/20 bg-white/10 px-5 py-3 text-sm font-semibold text-white hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-60"
+  >
+    <Download size={18} />
+    {exportingPdf ? "Gerando PDF..." : "Baixar PDF"}
+  </button>
+)}
               {allRows.length > 0 && (
                 <button
                   onClick={clearSavedBase}
@@ -1002,10 +1089,12 @@ export default function AnaliseExcelPage() {
                 >
                   <Trash2 size={18} />
                   Limpar base
+                  data-pdf-ignore="true"
                 </button>
               )}
 
               <LogoutButton />
+              data-pdf-ignore="true"
             </div>
           </div>
 

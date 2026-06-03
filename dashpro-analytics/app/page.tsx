@@ -14,6 +14,13 @@ import {
 import { supabase } from "@/lib/supabase";
 
 const cards = [
+    {
+  title: "Configurações",
+  description:
+    "Gerencie conta, plano, segurança e preferências do sistema.",
+  href: "/configuracoes",
+  icon: Settings,
+},
   {
     title: "Análise Excel",
     description:
